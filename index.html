@@ -18,7 +18,7 @@
   --ink-1:#f2f4f7; --ink-2:#a8b0be; --ink-3:#6c7482;
   --accent:#4d94ff; --accent-ink:#04101f; --accent-soft:rgba(77,148,255,.13);
   --good:#31c48d; --good-soft:rgba(49,196,141,.12); --warn:#fbbf24;
-  --c1:#4d94ff; --c2:#ff8a4d; --c3:#a78bfa;
+  --c1:#4d94ff; --c2:#ff8a4d; --c3:#a78bfa; --c4:#31c48d;
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 24px -8px rgba(0,0,0,.6);
   --shadow-lg:0 2px 4px rgba(0,0,0,.4), 0 24px 48px -12px rgba(0,0,0,.7);
   --canvas-bg:#0d0f13;
@@ -30,7 +30,7 @@
   --ink-1:#111418; --ink-2:#5a6472; --ink-3:#8b95a4;
   --accent:#1a6dd9; --accent-ink:#fff; --accent-soft:rgba(26,109,217,.09);
   --good:#0e9f6e; --good-soft:rgba(14,159,110,.1); --warn:#b45309;
-  --c1:#1a6dd9; --c2:#e2670c; --c3:#7c5cf0;
+  --c1:#1a6dd9; --c2:#e2670c; --c3:#7c5cf0; --c4:#0e9f6e;
   --shadow:0 1px 2px rgba(16,24,40,.05), 0 4px 12px -2px rgba(16,24,40,.08);
   --shadow-lg:0 2px 4px rgba(16,24,40,.04), 0 16px 32px -8px rgba(16,24,40,.12);
   --canvas-bg:#e9ebef;
@@ -260,6 +260,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
         </div>
         <h3>Drop a photo to redact it automatically</h3>
         <p>Obscura finds every person, vehicle and screen in the image and blurs them for you — so you can publish or share the photo without exposing anyone's identity.</p>
+        <p>Anything the detector misses, you can box yourself by dragging on the image.</p>
         <p><span class="kbd">Drop</span> <span class="kbd">Ctrl+V</span> <span class="kbd">Choose file</span></p>
       </div>
 
@@ -271,6 +272,10 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       <button class="btn primary" id="pick" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
         Choose image
+      </button>
+      <button class="btn" id="rescan" type="button" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/></svg>
+        Re-scan
       </button>
       <button class="btn" id="compare" type="button" aria-pressed="false" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v18M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
@@ -314,12 +319,20 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
         <div class="ctlTop"><label for="strength">Strength</label><span class="val num" id="strengthVal">70%</span></div>
         <input type="range" id="strength" min="20" max="100" step="5" value="70">
       </div>
+      <div class="ctl">
+        <div class="ctlTop">
+          <label for="sens">Detection sensitivity</label>
+          <span class="val num" id="sensVal">25%</span>
+        </div>
+        <input type="range" id="sens" min="10" max="70" step="5" value="25">
+        <p class="hint">Lower catches more objects but adds false positives. Missed something? Lower it and re-scan — or drag a box on the image yourself.</p>
+      </div>
     </div>
 
     <div class="sect">
       <div class="sechead"><h2>What to redact</h2><span class="meta" id="clsMeta"></span></div>
       <div class="classes" id="classes"></div>
-      <p class="hint">Click any highlighted region on the image to keep it visible or redact it individually.</p>
+      <p class="hint">Click a detected region to keep it visible. <b>Drag anywhere on the image</b> to add a manual redaction; click your own box to remove it.</p>
     </div>
 
     <div class="sect">
@@ -350,14 +363,20 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
     { id:"vehicles", name:"Vehicles",           ex:"car, bus, truck, motorcycle",  slot:"--c2",
       match:["car","bus","truck","motorcycle","bicycle","train","boat","airplane"] },
     { id:"screens",  name:"Screens & documents",ex:"laptop, phone, tv, book",      slot:"--c3",
-      match:["laptop","cell phone","tv","book","keyboard","mouse"] }
+      match:["laptop","cell phone","tv","book","keyboard","mouse"] },
+    { id:"manual",   name:"Manual areas",       ex:"drag on the image to add",     slot:"--c4",
+      match:[] }
   ];
 
+  // Detected boxes hug the object; a redaction that hugs the object leaves edges showing.
+  // Expand every automatic region by this fraction of its size before redacting.
+  var PAD = 0.10;
+
   var model = null, image = null;
-  var regions = [];                 // {bbox, class, score, group, on}
-  var enabled = { people:true, vehicles:true, screens:true };
-  var mode = "blur", strength = 70;
-  var showOutlines = true, comparing = false, dividerPct = 0.5;
+  var regions = [];                 // {bbox, class, score, group, on, manual}
+  var enabled = { people:true, vehicles:true, screens:true, manual:true };
+  var mode = "blur", strength = 70, sensitivity = 0.25;
+  var showOutlines = true, comparing = false, dividerPct = 0.5, dragBox = null;
   var srcCanvas = document.createElement("canvas");   // pristine copy
 
   function $(i){ return document.getElementById(i); }
@@ -461,6 +480,16 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       });
     }
 
+    if (dragBox) {
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = 4;
+      ctx.strokeRect(dragBox[0], dragBox[1], dragBox[2], dragBox[3]);
+      ctx.strokeStyle = cvar("--c4"); ctx.lineWidth = 2;
+      ctx.strokeRect(dragBox[0], dragBox[1], dragBox[2], dragBox[3]);
+      ctx.restore();
+    }
+
     // divider chrome is a DOM element so it stays crisp and draggable
     $("divider").style.left = cut + "px";
     updateStats();
@@ -522,11 +551,20 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 
     setTimeout(function () {
       var t0 = performance.now();
-      model.detect(srcCanvas, 30, 0.4).then(function (preds) {
+      var manual = regions.filter(function (r) { return r.manual; });   // survive a re-scan
+      model.detect(srcCanvas, 60, sensitivity).then(function (preds) {
         $("kMs").innerHTML = Math.round(performance.now() - t0) + '<span class="u">ms</span>';
         regions = preds.map(function (p) {
-          return { bbox:p.bbox, "class":p["class"], score:p.score, group:groupFor(p["class"]), on:true };
-        }).filter(function (r) { return r.group !== null; });
+          var b = p.bbox, px = b[2] * PAD, py = b[3] * PAD;
+          return {
+            bbox: [
+              Math.max(0, b[0] - px), Math.max(0, b[1] - py),
+              Math.min(srcCanvas.width, b[0] + b[2] + px) - Math.max(0, b[0] - px),
+              Math.min(srcCanvas.height, b[1] + b[3] + py) - Math.max(0, b[1] - py)
+            ],
+            "class":p["class"], score:p.score, group:groupFor(p["class"]), on:true
+          };
+        }).filter(function (r) { return r.group !== null; }).concat(manual);
 
         renderClasses();
         render();
@@ -538,6 +576,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
         $("download").disabled = false;
         $("compare").disabled = false;
         $("outlines").disabled = false;
+        $("rescan").disabled = false;
       })["catch"](function (e) {
         $("working").classList.remove("on");
         status("", "Detection failed");
@@ -570,6 +609,13 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       render();
     });
 
+    $("sens").addEventListener("input", function () {
+      sensitivity = +this.value / 100;
+      $("sensVal").textContent = this.value + "%";
+    });
+    $("sens").addEventListener("change", function () { if (image) detect(); });
+    $("rescan").addEventListener("click", detect);
+
     $("outlines").addEventListener("click", function () {
       showOutlines = !showOutlines;
       this.setAttribute("aria-pressed", showOutlines ? "true" : "false");
@@ -586,7 +632,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
     $("download").addEventListener("click", function () {
       // export without outlines or the compare wipe — the delivered file is fully redacted
       var keepO = showOutlines, keepC = comparing;
-      showOutlines = false; comparing = false; render();
+      showOutlines = false; comparing = false; dragBox = null; render();
       var a = document.createElement("a");
       a.download = "obscura-redacted.png";
       a.href = $("cv").toDataURL("image/png");
@@ -594,9 +640,42 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       showOutlines = keepO; comparing = keepC; render();
     });
 
-    // click a region to keep it visible / redact it again
-    $("cv").addEventListener("click", function (ev) {
-      if (!regions.length) return;
+    /* Pointer on the image does two jobs:
+       a short press toggles the region under the cursor, a drag draws a new one.
+       The model will always miss something eventually — manual boxes are the escape hatch
+       that makes the tool trustworthy rather than merely clever. */
+    var down = null, moved = false;
+
+    $("cv").addEventListener("mousedown", function (ev) {
+      if (!image) return;
+      down = canvasPoint(ev); moved = false;
+      ev.preventDefault();
+    });
+
+    window.addEventListener("mousemove", function (ev) {
+      if (!down) return;
+      var p = canvasPoint(ev);
+      if (Math.abs(p.x - down.x) > 5 || Math.abs(p.y - down.y) > 5) moved = true;
+      if (moved) {
+        dragBox = [Math.min(down.x, p.x), Math.min(down.y, p.y),
+                   Math.abs(p.x - down.x), Math.abs(p.y - down.y)];
+        render();
+      }
+    });
+
+    window.addEventListener("mouseup", function (ev) {
+      if (!down) return;
+      var start = down; down = null;
+
+      if (moved && dragBox && dragBox[2] > 8 && dragBox[3] > 8) {
+        regions.push({ bbox:dragBox.slice(), "class":"manual area", score:1, group:"manual", on:true, manual:true });
+        dragBox = null;
+        renderClasses(); render();
+        return;
+      }
+      dragBox = null;
+
+      // treated as a click: toggle (or delete, if it is one of yours)
       var p = canvasPoint(ev), hit = null;
       regions.forEach(function (r) {
         if (p.x >= r.bbox[0] && p.x <= r.bbox[0] + r.bbox[2] &&
@@ -604,7 +683,11 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
           if (!hit || (r.bbox[2] * r.bbox[3]) < (hit.bbox[2] * hit.bbox[3])) hit = r;   // smallest wins
         }
       });
-      if (hit) { hit.on = !hit.on; render(); }
+      if (hit) {
+        if (hit.manual) regions.splice(regions.indexOf(hit), 1);   // click your own box to remove it
+        else hit.on = !hit.on;
+        renderClasses(); render();
+      }
     });
 
     // divider drag
@@ -678,7 +761,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       notice("The detection model could not be reached. It loads from a CDN on first use and needs an internet connection — everything else runs offline.");
       return;
     }
-    cocoSsd.load({ base:"lite_mobilenet_v2" }).then(function (m) {
+    cocoSsd.load({ base:"mobilenet_v2" }).then(function (m) {
       model = m; status("ready", "Ready — drop an image");
     })["catch"](function () {
       status("", "Model failed to load");
@@ -691,5 +774,4 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 })();
 </script>
 </body>
-  
 </html>
